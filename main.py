@@ -5,15 +5,19 @@ import numpy as np
 import random
 import os
 
-# Try to import treys (may not be available on some runners); allow graceful fallback
+# Shared encoding utilities
 try:
-    from treys import Deck, Evaluator, Card  # type: ignore
-    HAS_TREYS = True
+    from training.encoding import card_str_to_treys, parse_rank_from_card, card_to_int  # type: ignore
+    ENCODING_AVAILABLE = True
 except Exception:
-    Deck = None
-    Evaluator = None
-    Card = None
-    HAS_TREYS = False
+    # If import fails, define minimal fallbacks (should be rare because file is in repo)
+    ENCODING_AVAILABLE = False
+    def card_str_to_treys(card: str) -> int:
+        return -1
+    def parse_rank_from_card(card: str) -> int:
+        return -1
+    def card_to_int(card: str) -> int:
+        return -1
 
 # Try to load ONNX runtime if available
 try:
@@ -22,6 +26,15 @@ try:
 except Exception:
     ort = None
     ONNX_AVAILABLE = False
+
+# Try to import treys types conditionally (used where available)
+try:
+    from treys import Deck, Evaluator  # type: ignore
+    HAS_TREYS = True
+except Exception:
+    Deck = None
+    Evaluator = None
+    HAS_TREYS = False
 
 app = FastAPI(title="Poker Suggestion API - Demo")
 
@@ -76,52 +89,18 @@ if ONNX_AVAILABLE and os.path.exists(ONNX_PATH):
     except Exception:
         onnx_sess = None
 
-def _parse_rank_from_card(card: str) -> int:
-    """Parse rank char from card string like 'As','Td','10h' -> return rank as int (2..14).
-    Return -1 on failure.
-    """
-    if not card or not isinstance(card, str):
-        return -1
-    s = card.strip()
-    if len(s) == 2:
-        rank = s[0].upper()
-    else:
-        # handle '10' e.g. '10s'
-        rank = s[:-1].upper()
-    rank_map = {'A':14, 'K':13, 'Q':12, 'J':11, 'T':10, '10':10,
-                '9':9, '8':8, '7':7, '6':6, '5':5, '4':4, '3':3, '2':2}
-    return rank_map.get(rank, -1)
-
-def card_str_to_treys(card: str) -> int:
-    """
-    Convert a card string like 'As', 'Kd' into the treys integer representation if treys is present.
-    If treys is unavailable or conversion fails, return -1 as sentinel.
-    """
-    if not HAS_TREYS or Card is None:
-        return -1
-    try:
-        return Card.new(card)
-    except Exception:
-        return -1
-
 def estimate_winrate_montecarlo(hero_cards, community_cards, num_players, in_hand, stacks, sims=100):
     """
-    Monte Carlo winrate estimator. If treys (Deck/Evaluator) are available, use them.
-    Otherwise fallback to a simple deterministic heuristic based on ranks so the function is safe
-    in CI / when treys is not installed.
+    Monte Carlo winrate estimator; prefer treys when available, otherwise fall back to a simple rank-based heuristic.
     """
-    # If treys available, run a lightweight montecarlo
-    if HAS_TREYS and Deck is not None and Evaluator is not None and Card is not None:
+    if HAS_TREYS and Deck is not None and Evaluator is not None:
         try:
             evaluator = Evaluator()
-            wins = 0
-            ties = 0
-            losses = 0
+            wins = ties = losses = 0
             hero_cards_t = [card_str_to_treys(c) for c in hero_cards] if hero_cards else []
             community_t = [card_str_to_treys(c) for c in community_cards] if community_cards else []
             for _ in range(max(10, int(sims))):
                 d = Deck()
-                # remove known cards
                 for c in hero_cards_t + community_t:
                     if c in d.cards:
                         d.cards.remove(c)
@@ -140,10 +119,7 @@ def estimate_winrate_montecarlo(hero_cards, community_cards, num_players, in_han
                     losses += 1
                     continue
                 hero_score = evaluator.evaluate(community_full, hero_cards_t)
-                opp_best = []
-                for h in sampled_opps:
-                    s = evaluator.evaluate(community_full, h)
-                    opp_best.append(s)
+                opp_best = [evaluator.evaluate(community_full, h) for h in sampled_opps]
                 better = sum(1 for s in opp_best if s < hero_score)
                 equal = sum(1 for s in opp_best if s == hero_score)
                 if better == 0 and equal == 0:
@@ -153,22 +129,17 @@ def estimate_winrate_montecarlo(hero_cards, community_cards, num_players, in_han
                 else:
                     losses += 1
             total = wins + ties + losses
-            winrate = (wins + 0.5 * ties) / total if total>0 else 0.0
-            return winrate
+            return (wins + 0.5 * ties) / total if total>0 else 0.0
         except Exception:
-            # fall through to heuristic
             pass
 
-    # Fallback heuristic (deterministic, fast) when treys unavailable
-    # Compute a simple strength estimate from hero card ranks (2..14)
-    ranks = [_parse_rank_from_card(c) for c in (hero_cards or [])]
+    # Fallback heuristic if treys unavailable / error
+    ranks = [parse_rank_from_card(c) for c in (hero_cards or [])]
     ranks = [r for r in ranks if r > 0]
     if not ranks:
         return 0.33
     avg_rank = sum(ranks) / len(ranks)
-    # map avg_rank [2..14] to winrate ~ [0.05 .. 0.95]
-    winrate = (avg_rank - 2) / (14 - 2)  # 0..1
-    # shrink toward 0.5 for more players / uncertainty
+    winrate = (avg_rank - 2) / (14 - 2)
     active = max(1, sum(1 for x in in_hand if x))
     adjustment = 1.0 - min(0.6, 0.1 * (active - 1))
     winrate = 0.5 + (winrate - 0.5) * adjustment
@@ -203,15 +174,14 @@ def softmax(scores):
 try:
     from training.collect_selfplay import default_state_to_feature
 except Exception:
-    # Fallback encoder: robustly map card strings to treys ints (or -1 if not available)
+    # Fallback encoder that uses the shared encoding helpers
     def default_state_to_feature(state):
         feats = []
         hand = state.get('hand') or state.get('raw_obs', {}).get('hand', []) or []
         for i in range(2):
             if i < len(hand):
                 try:
-                    c = hand[i]
-                    feats.append(int(card_str_to_treys(c)))
+                    feats.append(int(card_to_int(hand[i])))
                 except Exception:
                     feats.append(-1)
             else:
@@ -220,7 +190,7 @@ except Exception:
         for i in range(5):
             if i < len(community):
                 try:
-                    feats.append(int(card_str_to_treys(community[i])))
+                    feats.append(int(card_to_int(community[i])))
                 except Exception:
                     feats.append(-1)
             else:
@@ -305,20 +275,16 @@ def suggest(req: SuggestRequest):
     action_probabilities = None
     model_probs = onnx_policy_probs(req) if ONNX_AVAILABLE else None
     if model_probs is not None:
-        # Map model outputs to legal actions naively: assume model actions correspond to [fold,call,raise,allin,check,bet]
         model_action_names = ["fold","call","raise","allin","check","bet"]
-        # compress to only legal actions
         probs_map = {}
         for i,name in enumerate(model_action_names):
             if name in legal:
                 probs_map[name] = float(model_probs[i]) if i < len(model_probs) else 0.0
-        # normalize
         s = sum(probs_map.values())
         if s > 0:
             for k in probs_map:
                 probs_map[k] /= s
             action_probabilities = probs_map
-    # Fallback heuristic if ONNX not available or failed
     if action_probabilities is None:
         scores = {"fold":0.0,"call":0.0,"raise":0.0,"allin":0.0,"check":0.0,"bet":0.0}
         if req.to_call > 0:
@@ -346,7 +312,6 @@ def suggest(req: SuggestRequest):
         probs = softmax(legal_scores) if legal_scores else []
         action_probabilities = {a: float(p) for a,p in zip(legal, probs)}
 
-    # select recommended action
     best_action = max(action_probabilities.items(), key=lambda x: x[1])[0]
     recommended = best_action
 
