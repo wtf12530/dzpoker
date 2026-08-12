@@ -26,7 +26,12 @@ jobs:
       - name: Run smoke tests (start server & health check)
         run: |
           python tests/smoke_test.py
-
+      - name: Upload training log
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-log
+          path: training/train_log.csv
+      
   training_and_export:
     runs-on: ubuntu-latest
     needs: build
