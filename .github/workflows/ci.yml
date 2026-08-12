@@ -9,6 +9,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONUNBUFFERED: 1
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -20,6 +23,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r training/requirements.txt || true
-      - name: Run smoke tests
+      - name: Run smoke tests (start server & health check)
         run: |
           python tests/smoke_test.py
