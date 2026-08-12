@@ -48,7 +48,7 @@ jobs:
       - name: Export to ONNX if model present
         run: |
           if [ -f training/models/policy.pt ]; then
-            python training/export_onnx.py --model training/models/policy.pt --out training/models/policy.onnx --input-dim 29 --n-actions 6
+            python -m training.export_onnx --model training/models/policy.pt --out training/models/policy.onnx --input-dim 29 --n-actions 6
           else
             echo "No model found at training/models/policy.pt, skipping export"
           fi
