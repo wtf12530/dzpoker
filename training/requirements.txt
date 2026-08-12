@@ -1,0 +1,4 @@
+# Additional training dependencies
+rlcard
+torch
+numpy
