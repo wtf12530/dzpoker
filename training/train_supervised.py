@@ -1,7 +1,6 @@
 """
-Training utilities and a small supervised trainer with validation logging and checkpointing.
-This script is defensive: it always writes a training log CSV and saves a final model file (or a placeholder)
-so downstream CI/evaluation can inspect what happened.
+Defensive supervised trainer: always prints debug info, writes train_log.csv,
+and attempts to save a final model (or a placeholder) so CI can inspect run outputs.
 """
 import os
 import argparse
@@ -14,9 +13,9 @@ try:
     import torch.nn as nn
     import torch.optim as optim
     TORCH = True
-except Exception:
+except Exception as e:
+    print("Import torch failed at module import:", e)
     TORCH = False
-
 
 def build_model(input_dim: int, n_actions: int, hidden: int = 128, dropout: float = 0.0):
     if TORCH:
@@ -63,7 +62,6 @@ def build_model(input_dim: int, n_actions: int, hidden: int = 128, dropout: floa
 
         return FallbackModel(input_dim, n_actions, hidden)
 
-
 def _ensure_log_dir_and_header(log_path: str):
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     if not os.path.exists(log_path):
@@ -71,16 +69,15 @@ def _ensure_log_dir_and_header(log_path: str):
             writer = csv.writer(f)
             writer.writerow(['epoch', 'epochs', 'avg_loss', 'train_acc', 'val_acc'])
 
-
 def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: int,
                      hidden: int = 128, epochs: int = 5, batch_size: int = 128,
                      lr: float = 1e-3, weight_decay: float = 0.0, dropout: float = 0.0,
                      val_frac: float = 0.1, seed: int = 42, save_best: bool = True):
+    print("TRAIN_START: train_supervised called")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     log_path = os.path.join('training', 'train_log.csv')
     _ensure_log_dir_and_header(log_path)
 
-    # Prepare placeholders to ensure artifacts exist even if training fails early
     placeholder_model_path = out_path + '.placeholder'
     try:
         with open(placeholder_model_path, 'w') as f:
@@ -89,13 +86,12 @@ def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: i
         pass
 
     if not TORCH:
-        print("Torch not available in environment; cannot perform real training.")
+        print("Torch not available; creating fallback metadata and exiting.")
         model = build_model(input_dim, n_actions, hidden)
         try:
             sd = model.state_dict()
         except Exception:
             sd = {'_meta': {'input_dim': input_dim, 'n_actions': n_actions, 'hidden': hidden}}
-        # Save fallback metadata so downstream steps have something to inspect
         np.savez_compressed(out_path + '.npz', state=sd)
         print(f"Saved fallback model metadata to {out_path}.npz")
         return
@@ -107,12 +103,12 @@ def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: i
         states = data['states']
         actions = data['actions']
     else:
-        print(f"Dataset {data_path} not found, creating synthetic data for smoke training")
+        print(f"Dataset {data_path} not found, creating synthetic data")
         N = 1024
         states = np.random.randn(N, input_dim).astype(np.float32)
         actions = np.random.randint(0, n_actions, size=(N,))
 
-    # Deterministic split
+    print("Dataset shapes:", states.shape, actions.shape)
     np.random.seed(seed)
     idx = np.random.permutation(len(states))
     n_val = int(len(states) * val_frac)
@@ -154,14 +150,12 @@ def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: i
                 total_loss += loss.item() * xb.size(0)
             avg = total_loss / len(dataset)
 
-            # compute training accuracy on training set
             model.eval()
             with torch.no_grad():
                 logits_all = model(X_train)
                 preds = logits_all.argmax(dim=1)
                 train_acc = (preds == y_train).float().mean().item()
 
-                # validation accuracy
                 if n_val > 0:
                     logits_val = model(X_val)
                     preds_val = logits_val.argmax(dim=1)
@@ -170,27 +164,23 @@ def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: i
                     val_acc = float('nan')
             model.train()
 
-            print(f"Epoch {ep}/{epochs} avg_loss={avg:.4f} train_acc={train_acc:.4f} val_acc={val_acc if not np.isnan(val_acc) else 'N/A'}")
-
-            # append to CSV log
+            print(f"Epoch {ep}/{epochs} avg_loss={avg:.6f} train_acc={train_acc:.6f} val_acc={val_acc if not np.isnan(val_acc) else 'N/A'}")
             with open(log_path, 'a', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([ep, epochs, f"{avg:.6f}", f"{train_acc:.6f}", f"{val_acc if not np.isnan(val_acc) else ''}"])
 
-            # checkpoint best model by validation accuracy
             if save_best and (n_val > 0):
                 if val_acc > best_val_acc:
                     best_val_acc = val_acc
                     best_epoch = ep
                     best_path = os.path.join(os.path.dirname(out_path), 'best_policy.pt')
                     torch.save(model.state_dict(), best_path)
-                    print(f"Saved new best model (val_acc={best_val_acc:.6f}) to {best_path}")
+                    print(f"Saved new best model to {best_path}")
 
     except Exception as e:
         print("Exception during training:", e)
         traceback.print_exc()
 
-    # Save final model state_dict (last epoch) and remove placeholder
     try:
         torch.save(model.state_dict(), out_path)
         print(f"Saved final model state_dict to {out_path}")
@@ -202,7 +192,6 @@ def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: i
     except Exception as e:
         print("Failed to save final model state_dict:", e)
         traceback.print_exc()
-        # ensure there is at least a placeholder so CI can find something
         try:
             with open(placeholder_model_path, 'w') as f:
                 f.write('failed-to-save\n')
@@ -211,3 +200,24 @@ def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: i
 
     if save_best and best_epoch > 0:
         print(f"Best validation epoch: {best_epoch} val_acc={best_val_acc:.6f}")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data', type=str, default='training/data/selfplay.npz')
+    parser.add_argument('--out', type=str, default='training/models/policy.pt')
+    parser.add_argument('--input-dim', type=int, default=29)
+    parser.add_argument('--n-actions', type=int, default=6)
+    parser.add_argument('--hidden', type=int, default=128)
+    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--batch-size', type=int, default=256)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--val-frac', type=float, default=0.1)
+    parser.add_argument('--dropout', type=float, default=0.0)
+    parser.add_argument('--weight-decay', type=float, default=0.0)
+    parser.add_argument('--seed', type=int, default=42)
+    args = parser.parse_args()
+
+    train_supervised(args.data, args.out, args.input_dim, args.n_actions,
+                     hidden=args.hidden, epochs=args.epochs, batch_size=args.batch_size,
+                     lr=args.lr, weight_decay=args.weight_decay, dropout=args.dropout,
+                     val_frac=args.val_frac, seed=args.seed)
