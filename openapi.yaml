@@ -1,0 +1,184 @@
+openapi: 3.0.3
+info:
+  title: Poker Suggestion API
+  version: "1.0.0"
+  description: >
+    API to receive a poker game state and return recommended action (fold/check/call/raise/allin),
+    action probabilities, estimated winrate and EV. Demo implementation uses Monte-Carlo sampling.
+servers:
+  - url: http://localhost:8000
+paths:
+  /v1/suggest:
+    post:
+      summary: Get action suggestion for a single poker state
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestRequest'
+      responses:
+        '200':
+          description: Suggestion result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuggestResponse'
+  /v1/model_info:
+    get:
+      summary: Returns model & config info
+      responses:
+        '200':
+          description: Model info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelInfo'
+  /v1/health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+components:
+  schemas:
+    CardStr:
+      type: string
+      example: "As"
+      description: Two-character card string, rank followed by suit (e.g. As, Kd, 2h, Tc)
+    LastAction:
+      type: object
+      properties:
+        player:
+          type: integer
+        action:
+          type: string
+          example: "bet"
+        amount:
+          type: integer
+    Discretization:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: ["pot-fraction","stack-fraction","log"]
+          example: "pot-fraction"
+        bins:
+          type: integer
+          minimum: 2
+          maximum: 32
+          example: 12
+    SuggestRequest:
+      type: object
+      required:
+        - game_type
+        - num_players
+        - hero_index
+        - stacks
+        - in_hand
+        - pot
+        - big_blind
+        - to_call
+        - min_raise
+        - betting_round
+      properties:
+        game_type:
+          type: string
+          enum: ["no-limit","pot-limit","limit"]
+        num_players:
+          type: integer
+          minimum: 2
+          maximum: 9
+        hero_index:
+          type: integer
+        hero_cards:
+          type: array
+          items:
+            $ref: '#/components/schemas/CardStr'
+        community_cards:
+          type: array
+          items:
+            $ref: '#/components/schemas/CardStr'
+        stacks:
+          type: array
+          items:
+            type: integer
+        in_hand:
+          type: array
+          items:
+            type: boolean
+        contributed:
+          type: array
+          items:
+            type: integer
+        pot:
+          type: integer
+        big_blind:
+          type: integer
+        small_blind:
+          type: integer
+        to_call:
+          type: integer
+        min_raise:
+          type: integer
+        betting_round:
+          type: string
+          enum: ["preflop","flop","turn","river"]
+        last_actions:
+          type: array
+          items:
+            $ref: '#/components/schemas/LastAction'
+        discretization:
+          $ref: '#/components/schemas/Discretization'
+        game_id:
+          type: string
+    ActionProbMap:
+      type: object
+      additionalProperties:
+        type: number
+    SuggestResponse:
+      type: object
+      properties:
+        legal_actions:
+          type: array
+          items:
+            type: string
+        recommended_action:
+          type: string
+        action_probabilities:
+          $ref: '#/components/schemas/ActionProbMap'
+        raise_amount:
+          type: integer
+          nullable: true
+        raise_bin_index:
+          type: integer
+          nullable: true
+        estimated_winrate:
+          type: number
+        estimated_EV:
+          type: number
+        confidence:
+          type: number
+        explain:
+          type: string
+    ModelInfo:
+      type: object
+      properties:
+        model_name:
+          type: string
+        version:
+          type: string
+        discretization:
+          $ref: '#/components/schemas/Discretization'
+        supported_game_types:
+          type: array
+          items:
+            type: string
