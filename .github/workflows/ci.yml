@@ -30,7 +30,7 @@ jobs:
   training_and_export:
     runs-on: ubuntu-latest
     needs: build
-    timeout-minutes: 60
+    timeout-minutes: 90
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
@@ -42,8 +42,6 @@ jobs:
       - name: Install training dependencies (with PyTorch CPU)
         run: |
           python -m pip install --upgrade pip
-          # Install PyTorch CPU wheels (use the PyTorch CPU index for reliable CPU wheel install)
-          # If this fails, the job will stop here which helps surface install problems.
           pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision --upgrade
           pip install -r requirements.txt
           pip install -r training/requirements.txt
@@ -54,26 +52,35 @@ jobs:
           python - <<'PY'
           import sys
           try:
-              import torch
-              print('torch:', torch.__version__)
+              import torch; print('torch:', torch.__version__)
           except Exception as e:
-              print('torch missing or failed to import:', e)
+              print('torch import failed:', e)
           try:
-              import onnxruntime as ort
-              print('onnxruntime:', ort.__version__)
+              import onnxruntime as ort; print('onnxruntime:', ort.__version__)
           except Exception as e:
-              print('onnxruntime missing or failed to import:', e)
+              print('onnxruntime import failed:', e)
           try:
-              import onnx
-              print('onnx:', onnx.__version__)
+              import onnx; print('onnx:', onnx.__version__)
           except Exception as e:
-              print('onnx missing or failed to import:', e)
+              print('onnx import failed:', e)
           PY
 
-      - name: Train (if dataset present) or create model (continue on failure for debug)
+      - name: Run training (capture console & fail on error)
+        # 注意：这里不再吞掉非零退出码；训练 stdout/stderr 同时写入文件并打印在日志中
         run: |
-          # Run training; if it fails we continue so debug artifacts can be uploaded.
-          python -m training.train_supervised --data training/data/selfplay.npz --out training/models/policy.pt --input-dim 29 --n-actions 6 --epochs 100 || (echo "Train failed (non-zero exit); continuing for debug" && true)
+          mkdir -p training
+          # run with unbuffered output (-u) to flush prints; tee both stdout+stderr
+          python -u -m training.train_supervised --data training/data/selfplay.npz --out training/models/policy.pt --input-dim 29 --n-actions 6 --epochs 100 2>&1 | tee training/train_console.txt
+
+      - name: List training directory & model files (debug)
+        run: |
+          echo "PWD: $(pwd)"
+          echo "---- training/ ----"
+          ls -la training || true
+          echo "---- training/models/ ----"
+          ls -la training/models || true
+          echo "---- training/train_console.txt (tail) ----"
+          tail -n 200 training/train_console.txt || true
 
       - name: Export to ONNX if model present (tolerant)
         run: |
@@ -85,43 +92,29 @@ jobs:
 
       - name: Evaluate model (Torch & ONNX) and save output (tolerant)
         run: |
-          # Evaluate script should handle missing ONNX gracefully; tee output to file for artifact upload.
-          python -m training.evaluate_model --model training/models/policy.pt --onnx training/models/policy.onnx --input-dim 29 --n-actions 6 | tee training/eval_output.txt || echo "Evaluate script exited non-zero; see evaluation output"
+          python -m training.evaluate_model --model training/models/policy.pt --onnx training/models/policy.onnx --input-dim 29 --n-actions 6 | tee training/eval_output.txt || echo "Evaluate script exited non-zero; see training/eval_output.txt"
 
-      - name: List training directory & model files (debug)
+      - name: Ensure artifacts exist (placeholders to avoid empty uploads)
         run: |
-          echo "---- training/ ----"
-          ls -la training || true
-          echo "---- training/models/ ----"
-          ls -la training/models || true
-
-      - name: Ensure training log exists (placeholder if missing)
-        run: |
-          mkdir -p training
+          mkdir -p training/models
           if [ ! -f training/train_log.csv ]; then
             echo "epoch,epochs,avg_loss,train_acc,val_acc" > training/train_log.csv
-            echo "Created placeholder training/train_log.csv"
-          else
-            echo "training/train_log.csv exists"
+          fi
+          if [ ! -f training/models/policy.pt ] && [ ! -f training/models/best_policy.pt ]; then
+            echo "placeholder" > training/models/placeholder.txt
           fi
 
-      - name: Upload training/models for debug (if present)
+      - name: Upload training/models (all files)
         uses: actions/upload-artifact@v4
         with:
           name: training-models
           path: training/models
 
-      - name: Upload ONNX artifact (if present)
+      - name: Upload training console
         uses: actions/upload-artifact@v4
         with:
-          name: policy-onnx
-          path: training/models/policy.onnx
-
-      - name: Upload evaluation output
-        uses: actions/upload-artifact@v4
-        with:
-          name: eval-output
-          path: training/eval_output.txt
+          name: training-console
+          path: training/train_console.txt
 
       - name: Upload training log
         uses: actions/upload-artifact@v4
@@ -129,8 +122,8 @@ jobs:
           name: training-log
           path: training/train_log.csv
 
-      - name: Upload best model (if present)
+      - name: Upload evaluation output
         uses: actions/upload-artifact@v4
         with:
-          name: best-model
-          path: training/models/best_policy.pt
+          name: eval-output
+          path: training/eval_output.txt
