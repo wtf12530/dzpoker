@@ -1,23 +1,16 @@
-"""Training utilities and a small supervised trainer.
+"""
+Training utilities and a small supervised trainer.
 
 This script provides build_model (same API as the earlier stub) and
 also a minimal CLI to train a supervised policy from a saved
 training/data/selfplay.npz dataset (states, actions) and save a PyTorch
 state_dict at training/models/policy.pt. It is intended for development
 and CI smoke runs where a small quick training is acceptable.
-
-Behavior:
-- If torch is available, performs a few training steps and saves model.
-- If no dataset is present, creates a tiny synthetic dataset so the
-  CLI still produces a model for ONNX export testing.
-
-The goal is to make the repo's training -> export flow runnable in CI
-under reasonable (CPU) settings.
 """
-
 import os
 import argparse
 import numpy as np
+import csv
 
 try:
     import torch
@@ -46,7 +39,6 @@ def build_model(input_dim: int, n_actions: int, hidden: int = 128):
 
         return SimpleMLP(input_dim, n_actions, hidden)
     else:
-        # Fallback minimal model from the previous stub
         class FallbackModel:
             def __init__(self, input_dim, n_actions, hidden):
                 self.input_dim = input_dim
@@ -72,20 +64,28 @@ def build_model(input_dim: int, n_actions: int, hidden: int = 128):
         return FallbackModel(input_dim, n_actions, hidden)
 
 
+def _ensure_log_dir_and_header(log_path: str):
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    # If file not exists, write header
+    if not os.path.exists(log_path):
+        with open(log_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['epoch', 'epochs', 'avg_loss', 'train_acc'])
+
+
 def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: int,
                      hidden: int = 128, epochs: int = 5, batch_size: int = 128, lr: float = 1e-3):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    log_path = os.path.join('training', 'train_log.csv')
+    _ensure_log_dir_and_header(log_path)
 
     if not TORCH:
         print("Torch not available in environment; cannot perform real training.")
-        # Create a dummy state dict for compatibility if possible
         model = build_model(input_dim, n_actions, hidden)
         try:
             sd = model.state_dict()
-            # we can try to save using torch if available, but it's not
         except Exception:
             sd = {'_meta': {'input_dim': input_dim, 'n_actions': n_actions, 'hidden': hidden}}
-        # Save as numpy file as a fallback
         np.savez_compressed(out_path + '.npz', state=sd)
         print(f"Saved fallback model metadata to {out_path}.npz")
         return
@@ -98,7 +98,6 @@ def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: i
         actions = data['actions']
     else:
         print(f"Dataset {data_path} not found, creating synthetic data for smoke training")
-        # create a tiny synthetic dataset
         N = 1024
         states = np.random.randn(N, input_dim).astype(np.float32)
         actions = np.random.randint(0, n_actions, size=(N,))
@@ -125,7 +124,21 @@ def train_supervised(data_path: str, out_path: str, input_dim: int, n_actions: i
             optimizer.step()
             total_loss += loss.item() * xb.size(0)
         avg = total_loss / len(dataset)
-        print(f"Epoch {ep}/{epochs} avg_loss={avg:.4f}")
+
+        # compute training accuracy on full dataset (cheap for small datasets)
+        model.eval()
+        with torch.no_grad():
+            logits_all = model(X)
+            preds = logits_all.argmax(dim=1)
+            train_acc = (preds == y).float().mean().item()
+        model.train()
+
+        print(f"Epoch {ep}/{epochs} avg_loss={avg:.4f} train_acc={train_acc:.4f}")
+
+        # append to CSV log
+        with open(log_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([ep, epochs, f"{avg:.6f}", f"{train_acc:.6f}"])
 
     # Save model state_dict
     torch.save(model.state_dict(), out_path)
