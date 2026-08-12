@@ -1,4 +1,3 @@
-# training/rule_agent.py
 """
 A minimal rule-based RLCard agent. Implements choose_action(state) returning action index.
 The rules are intentionally simple and are meant to be a stronger baseline than RandomAgent.
