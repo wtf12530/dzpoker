@@ -2,3 +2,5 @@
 rlcard
 torch
 numpy
+onnx
+onnxscript
