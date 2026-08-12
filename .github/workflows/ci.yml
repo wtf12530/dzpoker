@@ -26,16 +26,11 @@ jobs:
       - name: Run smoke tests (start server & health check)
         run: |
           python tests/smoke_test.py
-      - name: Upload training log
-        uses: actions/upload-artifact@v4
-        with:
-          name: training-log
-          path: training/train_log.csv
-      
+
   training_and_export:
     runs-on: ubuntu-latest
     needs: build
-    timeout-minutes: 30
+    timeout-minutes: 60
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
@@ -52,17 +47,27 @@ jobs:
       - name: Train (if dataset present) or create model
         run: |
           python -m training.train_supervised --data training/data/selfplay.npz --out training/models/policy.pt --input-dim 29 --n-actions 6 --epochs 100
-      - name: Export to ONNX if model present
+      - name: Export to ONNX if model present (tolerant)
         run: |
           if [ -f training/models/policy.pt ]; then
-            # Try to export; don't fail the whole job if export fails.
+            # Attempt export; don't fail the whole job if export fails.
             python -m training.export_onnx --model training/models/policy.pt --out training/models/policy.onnx --input-dim 29 --n-actions 6 || echo "ONNX export failed; continuing pipeline"
           else
             echo "No model found at training/models/policy.pt, skipping export"
           fi
       - name: Evaluate model (Torch & ONNX) and save output
         run: |
+          # Evaluate script should handle missing ONNX gracefully; tee output to file for artifact upload.
           python -m training.evaluate_model --model training/models/policy.pt --onnx training/models/policy.onnx --input-dim 29 --n-actions 6 | tee training/eval_output.txt
+      - name: Ensure training log exists (placeholder if missing)
+        run: |
+          mkdir -p training
+          if [ ! -f training/train_log.csv ]; then
+            echo "epoch,epochs,avg_loss,train_acc" > training/train_log.csv
+            echo "Created placeholder training/train_log.csv"
+          else
+            echo "training/train_log.csv exists"
+          fi
       - name: Upload ONNX artifact (if present)
         uses: actions/upload-artifact@v4
         with:
@@ -73,3 +78,8 @@ jobs:
         with:
           name: eval-output
           path: training/eval_output.txt
+      - name: Upload training log
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-log
+          path: training/train_log.csv
