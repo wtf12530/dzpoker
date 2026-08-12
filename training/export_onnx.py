@@ -1,4 +1,3 @@
-# Simple exporter to ONNX for the supervised model
 """
 training/export_onnx.py
 
@@ -13,7 +12,6 @@ import torch
 import numpy as np
 from training.train_supervised import build_model
 
-
 def export(model_path, out_path, input_dim=None, n_actions=None):
     # load state dict
     state = torch.load(model_path, map_location='cpu')
@@ -26,7 +24,6 @@ def export(model_path, out_path, input_dim=None, n_actions=None):
     torch.onnx.export(model, dummy, out_path, input_names=['input'], output_names=['logits'],
                       dynamic_axes={'input': {0: 'batch'}, 'logits': {0: 'batch'}}, opset_version=11)
     print(f"Exported ONNX model to {out_path}")
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
