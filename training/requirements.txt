@@ -4,4 +4,4 @@ torch
 numpy
 onnx
 onnxscript
-onnxruntime
+onnxruntime>=1.15
