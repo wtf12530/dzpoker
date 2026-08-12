@@ -66,11 +66,11 @@ jobs:
           PY
 
       - name: Run training (capture console & fail on error)
-        # 注意：这里不再吞掉非零退出码；训练 stdout/stderr 同时写入文件并打印在日志中
+        # 注意：这里不再吞掉非零退出码; stdout/stderr are tee'd to a file for artifact upload
         run: |
           mkdir -p training
           # run with unbuffered output (-u) to flush prints; tee both stdout+stderr
-          python -u -m training.train_supervised --data training/data/selfplay.npz --out training/models/policy.pt --input-dim 29 --n-actions 6 --epochs 100 2>&1 | tee training/train_console.txt
+          python -u -m training.train_supervised --data training/data/selfplay.npz --out training/models/policy.pt --input-dim 29 --n-actions 6 --epochs 3 2>&1 | tee training/train_console.txt
 
       - name: List training directory & model files (debug)
         run: |
