@@ -4,11 +4,20 @@ from typing import List, Optional, Dict, Any
 import numpy as np
 import random
 import os
-from treys import Deck, Evaluator, Card
+
+# Try to import treys (may not be available on some runners); allow graceful fallback
+try:
+    from treys import Deck, Evaluator, Card  # type: ignore
+    HAS_TREYS = True
+except Exception:
+    Deck = None
+    Evaluator = None
+    Card = None
+    HAS_TREYS = False
 
 # Try to load ONNX runtime if available
 try:
-    import onnxruntime as ort
+    import onnxruntime as ort  # type: ignore
     ONNX_AVAILABLE = True
 except Exception:
     ort = None
@@ -35,12 +44,12 @@ class SuggestRequest(BaseModel):
     stacks: List[int] = Field(default_factory=list)
     in_hand: List[bool] = Field(default_factory=list)
     contributed: List[int] = Field(default_factory=list)
-    pot: int
-    big_blind: int
+    pot: int = 0
+    big_blind: int = 0
     small_blind: Optional[int] = 0
-    to_call: int
-    min_raise: int
-    betting_round: str
+    to_call: int = 0
+    min_raise: int = 0
+    betting_round: str = "preflop"
     last_actions: List[LastAction] = Field(default_factory=list)
     discretization: Discretization = Field(default_factory=Discretization)
 
@@ -56,8 +65,6 @@ class SuggestResponse(BaseModel):
     explain: Optional[str] = ""
 
 # ---------- Helper functions ----------
-evaluator = Evaluator()
-
 DEFAULT_FRACTIONS = [0.25,0.5,0.75,1.0,1.5,2.0,3.0,4.0,6.0,8.0,12.0]
 
 ONNX_PATH = os.getenv('ONNX_MODEL_PATH', 'training/models/policy.onnx')
@@ -69,58 +76,103 @@ if ONNX_AVAILABLE and os.path.exists(ONNX_PATH):
     except Exception:
         onnx_sess = None
 
+def _parse_rank_from_card(card: str) -> int:
+    """Parse rank char from card string like 'As','Td','10h' -> return rank as int (2..14).
+    Return -1 on failure.
+    """
+    if not card or not isinstance(card, str):
+        return -1
+    s = card.strip()
+    if len(s) == 2:
+        rank = s[0].upper()
+    else:
+        # handle '10' e.g. '10s'
+        rank = s[:-1].upper()
+    rank_map = {'A':14, 'K':13, 'Q':12, 'J':11, 'T':10, '10':10,
+                '9':9, '8':8, '7':7, '6':6, '5':5, '4':4, '3':3, '2':2}
+    return rank_map.get(rank, -1)
+
 def card_str_to_treys(card: str) -> int:
     """
-    Convert a card string like 'As', 'Kd' into the treys integer representation.
-    Wraps Card.new and returns an int; on failure raises.
+    Convert a card string like 'As', 'Kd' into the treys integer representation if treys is present.
+    If treys is unavailable or conversion fails, return -1 as sentinel.
     """
-    return Card.new(card)
+    if not HAS_TREYS or Card is None:
+        return -1
+    try:
+        return Card.new(card)
+    except Exception:
+        return -1
 
 def estimate_winrate_montecarlo(hero_cards, community_cards, num_players, in_hand, stacks, sims=100):
-    wins = 0
-    ties = 0
-    losses = 0
-    # Build deck and remove known cards
-    hero_cards_t = [card_str_to_treys(c) for c in hero_cards] if hero_cards else []
-    community_t = [card_str_to_treys(c) for c in community_cards] if community_cards else []
+    """
+    Monte Carlo winrate estimator. If treys (Deck/Evaluator) are available, use them.
+    Otherwise fallback to a simple deterministic heuristic based on ranks so the function is safe
+    in CI / when treys is not installed.
+    """
+    # If treys available, run a lightweight montecarlo
+    if HAS_TREYS and Deck is not None and Evaluator is not None and Card is not None:
+        try:
+            evaluator = Evaluator()
+            wins = 0
+            ties = 0
+            losses = 0
+            hero_cards_t = [card_str_to_treys(c) for c in hero_cards] if hero_cards else []
+            community_t = [card_str_to_treys(c) for c in community_cards] if community_cards else []
+            for _ in range(max(10, int(sims))):
+                d = Deck()
+                # remove known cards
+                for c in hero_cards_t + community_t:
+                    if c in d.cards:
+                        d.cards.remove(c)
+                active_count = sum(1 for x in in_hand if x)
+                num_opponents = max(0, active_count - 1)
+                sampled_opps = []
+                needed = num_opponents * 2
+                if needed > 0:
+                    sampled = d.draw(needed)
+                    for i in range(num_opponents):
+                        sampled_opps.append([sampled[2*i], sampled[2*i+1]])
+                rem = 5 - len(community_t)
+                community_draw = d.draw(rem) if rem>0 else []
+                community_full = community_t + community_draw
+                if not hero_cards_t:
+                    losses += 1
+                    continue
+                hero_score = evaluator.evaluate(community_full, hero_cards_t)
+                opp_best = []
+                for h in sampled_opps:
+                    s = evaluator.evaluate(community_full, h)
+                    opp_best.append(s)
+                better = sum(1 for s in opp_best if s < hero_score)
+                equal = sum(1 for s in opp_best if s == hero_score)
+                if better == 0 and equal == 0:
+                    wins += 1
+                elif better == 0 and equal > 0:
+                    ties += 1
+                else:
+                    losses += 1
+            total = wins + ties + losses
+            winrate = (wins + 0.5 * ties) / total if total>0 else 0.0
+            return winrate
+        except Exception:
+            # fall through to heuristic
+            pass
 
-    for _ in range(sims):
-        d = Deck()
-        for c in hero_cards_t + community_t:
-            if c in d.cards:
-                d.cards.remove(c)
-        # sample opponents
-        active_count = sum(1 for x in in_hand if x)
-        num_opponents = max(0, active_count - 1)
-        sampled_opps = []
-        needed = num_opponents * 2
-        if needed > 0:
-            sampled = d.draw(needed)
-            for i in range(num_opponents):
-                sampled_opps.append([sampled[2*i], sampled[2*i+1]])
-        rem = 5 - len(community_t)
-        community_draw = d.draw(rem) if rem>0 else []
-        community_full = community_t + community_draw
-        if not hero_cards_t:
-            losses += 1
-            continue
-        hero_score = evaluator.evaluate(community_full, hero_cards_t)
-        opp_best = []
-        for h in sampled_opps:
-            s = evaluator.evaluate(community_full, h)
-            opp_best.append(s)
-        better = sum(1 for s in opp_best if s < hero_score)
-        equal = sum(1 for s in opp_best if s == hero_score)
-        if better == 0 and equal == 0:
-            wins += 1
-        elif better == 0 and equal > 0:
-            ties += 1
-        else:
-            losses += 1
-
-    total = wins + ties + losses
-    winrate = (wins + 0.5 * ties) / total if total>0 else 0.0
-    return winrate
+    # Fallback heuristic (deterministic, fast) when treys unavailable
+    # Compute a simple strength estimate from hero card ranks (2..14)
+    ranks = [_parse_rank_from_card(c) for c in (hero_cards or [])]
+    ranks = [r for r in ranks if r > 0]
+    if not ranks:
+        return 0.33
+    avg_rank = sum(ranks) / len(ranks)
+    # map avg_rank [2..14] to winrate ~ [0.05 .. 0.95]
+    winrate = (avg_rank - 2) / (14 - 2)  # 0..1
+    # shrink toward 0.5 for more players / uncertainty
+    active = max(1, sum(1 for x in in_hand if x))
+    adjustment = 1.0 - min(0.6, 0.1 * (active - 1))
+    winrate = 0.5 + (winrate - 0.5) * adjustment
+    return float(max(0.01, min(0.99, winrate)))
 
 def map_bins_to_amounts(pot, to_call, min_raise, effective_stack, bins):
     fractions = DEFAULT_FRACTIONS.copy()
@@ -137,7 +189,7 @@ def map_bins_to_amounts(pot, to_call, min_raise, effective_stack, bins):
         desired = max(desired, min_raise)
         desired = min(desired, max_allowed)
         amounts.append(desired)
-    if amounts[-1] != max_allowed:
+    if amounts and amounts[-1] != max_allowed:
         amounts[-1] = max_allowed
     uniq = sorted(list(dict.fromkeys(amounts)))
     return uniq
@@ -151,7 +203,7 @@ def softmax(scores):
 try:
     from training.collect_selfplay import default_state_to_feature
 except Exception:
-    # Fallback encoder: robustly map card strings to treys ints; on error use -1
+    # Fallback encoder: robustly map card strings to treys ints (or -1 if not available)
     def default_state_to_feature(state):
         feats = []
         hand = state.get('hand') or state.get('raw_obs', {}).get('hand', []) or []
@@ -245,7 +297,7 @@ def suggest(req: SuggestRequest):
     pot_after_call = req.pot + req.to_call
     est_EV = winrate * pot_after_call - req.to_call
 
-    effective_stack = req.stacks[req.hero_index] if 0 <= req.hero_index < len(req.stacks) else max(req.stacks)
+    effective_stack = req.stacks[req.hero_index] if 0 <= req.hero_index < len(req.stacks) else (max(req.stacks) if req.stacks else 0)
     bins = req.discretization.bins if req.discretization else 12
     amounts = map_bins_to_amounts(req.pot, req.to_call, req.min_raise, effective_stack, bins)
 
@@ -270,7 +322,7 @@ def suggest(req: SuggestRequest):
     if action_probabilities is None:
         scores = {"fold":0.0,"call":0.0,"raise":0.0,"allin":0.0,"check":0.0,"bet":0.0}
         if req.to_call > 0:
-            pot_odds = req.to_call / (req.pot + req.to_call)
+            pot_odds = req.to_call / (req.pot + req.to_call) if (req.pot + req.to_call) > 0 else 1.0
             if winrate > pot_odds + 0.10:
                 scores["raise"] += (winrate - pot_odds)
                 scores["call"] += 0.2
@@ -291,7 +343,7 @@ def suggest(req: SuggestRequest):
         if winrate > 0.92:
             scores["allin"] += 3.0
         legal_scores = [scores[a] if a in scores else 0.0 for a in legal]
-        probs = softmax(legal_scores)
+        probs = softmax(legal_scores) if legal_scores else []
         action_probabilities = {a: float(p) for a,p in zip(legal, probs)}
 
     # select recommended action
@@ -300,7 +352,7 @@ def suggest(req: SuggestRequest):
 
     raise_amount = None
     raise_bin = None
-    if recommended in ("raise","bet"):
+    if recommended in ("raise","bet") and amounts:
         idx = int(min(len(amounts)-1, max(0, int(round(winrate * (len(amounts)-1))))))
         raise_amount = int(amounts[idx])
         raise_bin = idx
