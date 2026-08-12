@@ -52,8 +52,16 @@ jobs:
           else
             echo "No model found at training/models/policy.pt, skipping export"
           fi
+      - name: Evaluate model (Torch & ONNX) and save output
+        run: |
+          python -m training.evaluate_model --model training/models/policy.pt --onnx training/models/policy.onnx --input-dim 29 --n-actions 6 | tee training/eval_output.txt
       - name: Upload ONNX artifact (if present)
         uses: actions/upload-artifact@v4
         with:
           name: policy-onnx
           path: training/models/policy.onnx
+      - name: Upload evaluation output
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-output
+          path: training/eval_output.txt
