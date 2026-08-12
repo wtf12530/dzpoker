@@ -14,7 +14,6 @@ Or (less recommended):
 import os
 import sys
 if __package__ is None:
-    # file is being executed as a script: insert repo root (parent of training/)
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
