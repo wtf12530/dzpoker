@@ -1,0 +1,5 @@
+fastapi==0.95.2
+uvicorn[standard]==0.22.0
+pydantic==1.10.12
+numpy==1.27.6
+treys==0.1.5

@@ -1,0 +1,21 @@
+{
+  "game_type": "no-limit",
+  "num_players": 6,
+  "hero_index": 2,
+  "hero_cards": ["As","Kd"],
+  "community_cards": ["2h","7s","Jh"],
+  "stacks": [1000, 500, 1200, 800, 1500, 900],
+  "in_hand": [true, true, true, true, true, true],
+  "contributed": [50, 50, 50, 50, 50, 50],
+  "pot": 300,
+  "big_blind": 50,
+  "small_blind": 25,
+  "to_call": 100,
+  "min_raise": 200,
+  "betting_round": "flop",
+  "last_actions": [
+    {"player":1,"action":"bet","amount":50},
+    {"player":3,"action":"raise","amount":200}
+  ],
+  "discretization": {"type":"pot-fraction","bins":12}
+}

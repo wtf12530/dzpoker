@@ -1,0 +1,15 @@
+# Python.gitignore
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.env
+.venv
+venv/
+*.log
+*.sqlite3
+.idea/
+.vscode/
+.envrc
+.DS_Store
