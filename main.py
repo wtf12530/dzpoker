@@ -30,19 +30,19 @@ class SuggestRequest(BaseModel):
     game_type: str
     num_players: int
     hero_index: int
-    hero_cards: Optional[List[str]] = []
-    community_cards: Optional[List[str]] = []
-    stacks: List[int]
-    in_hand: List[bool]
-    contributed: Optional[List[int]] = []
+    hero_cards: List[str] = Field(default_factory=list)
+    community_cards: List[str] = Field(default_factory=list)
+    stacks: List[int] = Field(default_factory=list)
+    in_hand: List[bool] = Field(default_factory=list)
+    contributed: List[int] = Field(default_factory=list)
     pot: int
     big_blind: int
     small_blind: Optional[int] = 0
     to_call: int
     min_raise: int
     betting_round: str
-    last_actions: Optional[List[LastAction]] = []
-    discretization: Optional[Discretization] = Discretization()
+    last_actions: List[LastAction] = Field(default_factory=list)
+    discretization: Discretization = Field(default_factory=Discretization)
 
 class SuggestResponse(BaseModel):
     legal_actions: List[str]
@@ -70,6 +70,10 @@ if ONNX_AVAILABLE and os.path.exists(ONNX_PATH):
         onnx_sess = None
 
 def card_str_to_treys(card: str) -> int:
+    """
+    Convert a card string like 'As', 'Kd' into the treys integer representation.
+    Wraps Card.new and returns an int; on failure raises.
+    """
     return Card.new(card)
 
 def estimate_winrate_montecarlo(hero_cards, community_cards, num_players, in_hand, stacks, sims=100):
@@ -147,21 +151,45 @@ def softmax(scores):
 try:
     from training.collect_selfplay import default_state_to_feature
 except Exception:
+    # Fallback encoder: robustly map card strings to treys ints; on error use -1
     def default_state_to_feature(state):
         feats = []
-        hand = state.get('hand', [])
+        hand = state.get('hand') or state.get('raw_obs', {}).get('hand', []) or []
         for i in range(2):
-            feats.append(int(hand[i]) if i < len(hand) else -1)
-        community = state.get('public_cards', [])
+            if i < len(hand):
+                try:
+                    c = hand[i]
+                    feats.append(int(card_str_to_treys(c)))
+                except Exception:
+                    feats.append(-1)
+            else:
+                feats.append(-1)
+        community = state.get('public_cards') or state.get('raw_obs', {}).get('public_cards', []) or []
         for i in range(5):
-            feats.append(int(community[i]) if i < len(community) else -1)
+            if i < len(community):
+                try:
+                    feats.append(int(card_str_to_treys(community[i])))
+                except Exception:
+                    feats.append(-1)
+            else:
+                feats.append(-1)
         for k in ['pot', 'to_call', 'min_raise', 'current_player']:
-            feats.append(float(state.get(k, 0)))
-        stacks = state.get('stacks', [])
-        in_hand = state.get('in_hand', [])
+            v = state.get(k, 0)
+            try:
+                feats.append(float(v))
+            except Exception:
+                feats.append(0.0)
+        stacks = state.get('stacks') or state.get('raw_obs', {}).get('stacks', []) or []
+        in_hand = state.get('in_hand') or state.get('raw_obs', {}).get('in_hand', []) or []
         for i in range(9):
-            feats.append(float(stacks[i]) if i < len(stacks) else 0.0)
-            feats.append(1.0 if (i < len(in_hand) and in_hand[i]) else 0.0)
+            try:
+                feats.append(float(stacks[i]) if i < len(stacks) else 0.0)
+            except Exception:
+                feats.append(0.0)
+            try:
+                feats.append(1.0 if (i < len(in_hand) and in_hand[i]) else 0.0)
+            except Exception:
+                feats.append(0.0)
         return np.array(feats, dtype=np.float32)
 
 def state_to_model_input_vector(req: SuggestRequest) -> np.ndarray:
