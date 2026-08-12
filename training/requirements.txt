@@ -4,3 +4,4 @@ torch
 numpy
 onnx
 onnxscript
+onnxruntime
