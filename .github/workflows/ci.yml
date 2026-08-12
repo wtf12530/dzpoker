@@ -46,7 +46,7 @@ jobs:
           pip install --upgrade "onnxruntime>=1.15"
       - name: Train (if dataset present) or create model
         run: |
-          python -m training.train_supervised --data training/data/selfplay.npz --out training/models/policy.pt --input-dim 29 --n-actions 6 --epochs 50
+          python -m training.train_supervised --data training/data/selfplay.npz --out training/models/policy.pt --input-dim 29 --n-actions 6 --epochs 100
       - name: Export to ONNX if model present
         run: |
           if [ -f training/models/policy.pt ]; then
